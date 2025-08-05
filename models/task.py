@@ -1,0 +1,36 @@
+from sqlalchemy import Table, Column, Integer, String, Text, Boolean, TIMESTAMP, ForeignKey
+from database import metadata
+
+task = Table(
+    "task",
+    metadata,
+    Column("task_id", Integer, primary_key=True),
+    Column("title", Text, nullable=False),
+    Column("description", Text),
+    Column("priority_level", String),
+    Column("status", String, nullable=False),
+    Column("code", Text, unique=True),
+    Column("assigned_to", Integer, ForeignKey("users.user_id")),
+    Column("manager_id", Integer, ForeignKey("users.user_id")),
+    Column("due_date", TIMESTAMP),
+    Column("related_vendor", Integer, ForeignKey("vendor.vendor_id")),
+    Column("completion_notes", Text),
+    Column("completion_date", TIMESTAMP),
+    Column("project_id", Integer, ForeignKey("project.project_id")),
+    Column("event_id", Integer, ForeignKey("event.event_id")),
+    Column("tenant_id", Integer, ForeignKey("tenant.tenant_id")),
+    Column("event_phase", String),
+    Column("recurrence_rule", Text),
+    Column("recurrence_end_date", TIMESTAMP),
+    Column("parent_task_id", Integer, ForeignKey("task.task_id"), nullable=True),
+    Column("is_main_task", Boolean, default=False),
+    Column("user_group_id", Integer, ForeignKey("user_groups.user_group_id")),
+    Column("space_id", Integer, ForeignKey("space.space_id")),
+    Column("asset_id", Integer, ForeignKey("asset.asset_id")),
+    Column("is_archived", Boolean, default=False),
+    Column("archived_at", TIMESTAMP),
+    Column("created_by", Integer, ForeignKey("users.user_id")),
+    Column("updated_by", Integer, ForeignKey("users.user_id")),
+    Column("created_at", TIMESTAMP),
+    Column("updated_at", TIMESTAMP)
+)
