@@ -33,6 +33,7 @@ class AssetOut(AssetBase):
     updated_by: Optional[int]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
+    space_label: Optional[str] = None
 
     class Config:
         orm_mode = True

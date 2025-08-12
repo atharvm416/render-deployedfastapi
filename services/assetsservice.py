@@ -4,6 +4,8 @@ from schemas.assetsschema import AssetCreate, AssetUpdate, AssetOut
 from sqlalchemy import func, select, desc, and_
 from functions.generateId import generate_code
 from typing import Optional, List
+from sqlalchemy.orm import aliased
+from models.space import space
 
 async def create_asset(data: AssetCreate) -> AssetOut | None:
     insert_query = asset.insert().values(
@@ -73,34 +75,49 @@ async def list_assets_paginated(
 ) -> dict:
     page = max(page, 1)
 
-    # count query
-    count_query = select(func.count()).select_from(asset).where(asset.c.tenant_id == tenant_id)
+    filters = [asset.c.tenant_id == tenant_id]
     if status != "all":
-        count_query = count_query.where(asset.c.status == status)
+        filters.append(asset.c.status == status)
+
+    # total count
+    count_query = select(func.count()).select_from(asset).where(and_(*filters))
     total = await database.fetch_val(count_query)
 
     offset = (page - 1) * page_size
 
-    # data query
+    # alias for space table
+    space_tbl = aliased(space)
+
+    # main query with space join
     query = (
-        asset.select()
-        .where(asset.c.tenant_id == tenant_id)
+        select(
+            asset,
+            space_tbl.c.label.label("space_label")
+        )
+        .select_from(
+            asset.outerjoin(space_tbl, asset.c.space_id == space_tbl.c.space_id)
+        )
+        .where(and_(*filters))
         .order_by(desc(asset.c.updated_at))
         .offset(offset)
         .limit(page_size)
     )
-    if status != "all":
-        query = query.where(asset.c.status == status)
 
     records = await database.fetch_all(query)
+
+    # convert to dict and handle missing space_label
+    items = []
+    for r in records:
+        row = dict(r)
+        row["space_label"] = row.get("space_label") or None
+        items.append(row)
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [dict(r) for r in records]
+        "items": items
     }
-
 
 async def search_assets(query: Optional[str], tenant_id: int, limit: int = 5) -> List[AssetOut]:
     filters = [asset.c.tenant_id == tenant_id]

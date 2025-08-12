@@ -3,7 +3,7 @@ from database import database
 from schemas.taskschema import TaskCreate, TaskUpdate, TaskOut
 from functions.generateId import generate_code
 from sqlalchemy import select, and_, desc, func
-from datetime import datetime
+from datetime import datetime, time
 from typing import Optional
 from sqlalchemy.orm import aliased
 from models.users import users 
@@ -224,110 +224,148 @@ async def get_all_tasks_by_tenant(tenant_id: int) -> list[TaskOut]:
     rows = await database.fetch_all(query)
     return [TaskOut(**row) for row in rows]
 
-
 async def create_task_with_recurrence(data: TaskCreate) -> Optional[TaskOut]:
     validated = TaskCreate(**data.dict())
-
     now = datetime.utcnow()
 
-    # Insert parent task
-    insert_query = task.insert().values(
-        title=validated.title,
-        description=validated.description,
-        priority_level=validated.priority_level,
-        status=validated.status,
-        assigned_to=validated.assigned_to,
-        manager_id=validated.manager_id,
-        related_vendor=validated.related_vendor,
-        completion_notes=validated.completion_notes,
-        completion_date=strip_tz(validated.completion_date),
-        project_id=validated.project_id,
-        event_id=validated.event_id,
-        tenant_id=validated.tenant_id,
-        event_phase=validated.event_phase,
-        recurrence_rule=validated.recurrence_rule,
-        recurrence_end_date=strip_tz(validated.recurrence_end_date),
-        due_date=strip_tz(validated.recurrence_end_date),
-        is_main_task=True,
-        user_group_id=validated.user_group_id,
-        space_id=validated.space_id,
-        asset_id=validated.asset_id,
-        is_archived=validated.is_archived,
-        archived_at=strip_tz(validated.archived_at),
-        created_by=validated.created_by,
-        updated_by=validated.created_by,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow()
-    )
+    # =========================
+    # Determine due dates etc.
+    # =========================
+    parent_due_date = validated.due_date or now
+    start_date = parent_due_date
+    recurrence_end_date = validated.recurrence_end_date
 
-    parent_task_id = await database.execute(insert_query)
-
-    # Update parent task code
-    parent_code = generate_code("TASK", parent_task_id)
-    await database.execute(
-        task.update().where(task.c.task_id == parent_task_id).values(code=parent_code)
-    )
-
-    # Fetch parent task
-    row = await database.fetch_one(task.select().where(task.c.task_id == parent_task_id))
-    parent_task = TaskOut(**row) if row else None
-
-    # If no recurrence specified, return just the parent
-    if not validated.recurrence_rule or not validated.recurrence_end_date:
-        return parent_task
-
-    # determine start_date
-    start_date = validated.due_date or datetime.utcnow()
-    recurrence_rule_clean = re.sub(r'UNTIL=([0-9T]+)Z', r'UNTIL=\1', validated.recurrence_rule)
-
-    rrule_str = f"DTSTART:{start_date.strftime('%Y%m%dT%H%M%S')}\nRRULE:{recurrence_rule_clean}"
-    rule = rrulestr(rrule_str, dtstart=start_date)
-
-
-    for dt in rule.between(now, validated.recurrence_end_date, inc=True):
-        # Skip if equal to parent task's due_date (to avoid duplicate if parent is future)
-        if dt == validated.due_date:
-            continue
-
-        insert_query = task.insert().values(
+    # ==================================
+    # Insert the parent (main) task
+    # ==================================
+    parent_task_id = await database.execute(
+        task.insert().values(
             title=validated.title,
             description=validated.description,
             priority_level=validated.priority_level,
             status=validated.status,
             assigned_to=validated.assigned_to,
             manager_id=validated.manager_id,
-            due_date=strip_tz(dt),
             related_vendor=validated.related_vendor,
-            completion_notes=None,
-            completion_date=None,
+            completion_notes=validated.completion_notes,
+            completion_date=strip_tz(validated.completion_date),
             project_id=validated.project_id,
             event_id=validated.event_id,
             tenant_id=validated.tenant_id,
             event_phase=validated.event_phase,
-            recurrence_rule=None,
-            recurrence_end_date=None,
-            is_main_task=False,
+            recurrence_rule=validated.recurrence_rule,
+            recurrence_end_date=strip_tz(recurrence_end_date),
+            due_date=strip_tz(recurrence_end_date),
+            is_main_task=True,
+            user_group_id=validated.user_group_id,
             space_id=validated.space_id,
             asset_id=validated.asset_id,
-            is_archived=False,
-            archived_at=None,
+            is_archived=validated.is_archived,
+            archived_at=strip_tz(validated.archived_at),
             created_by=validated.created_by,
             updated_by=validated.created_by,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            parent_task_id=parent_task_id
+            created_at=now,
+            updated_at=now
+        )
+    )
+
+    parent_code = generate_code("TASK", parent_task_id)
+    await database.execute(
+        task.update().where(task.c.task_id == parent_task_id).values(code=parent_code)
+    )
+
+    parent_row = await database.fetch_one(
+        task.select().where(task.c.task_id == parent_task_id)
+    )
+    parent_task = TaskOut(**parent_row) if parent_row else None
+
+    # =====================================
+    # If no recurrence rule, we are done
+    # =====================================
+    if not validated.recurrence_rule or not recurrence_end_date:
+        return parent_task
+
+    # ===============================================
+    # Ensure RRULE UNTIL is accurate & end of day
+    # ===============================================
+    # Clean "Z" at the end (dateutil expects no trailing Z for naive local times)
+    recurrence_rule_clean = re.sub(
+        r'UNTIL=([0-9T]+)Z',
+        r'UNTIL=\1',
+        validated.recurrence_rule
+    )
+
+    # If recurrence_end_date is date-only or time is at midnight, set to end-of-day
+    if isinstance(recurrence_end_date, datetime) and recurrence_end_date.time() == time(0, 0):
+        recurrence_end_date = recurrence_end_date.replace(hour=23, minute=59, second=59)
+
+    # Replace UNTIL in RRULE to match recurrence_end_date (full date+time)
+    if recurrence_end_date:
+        until_value = recurrence_end_date.strftime("%Y%m%dT%H%M%S")
+        # Replace any existing UNTIL (with or without T/hhmmss)
+        recurrence_rule_clean = re.sub(
+            r'UNTIL=\d{8}(T\d{6})?',
+            f'UNTIL={until_value}',
+            recurrence_rule_clean
         )
 
-        child_task_id = await database.execute(insert_query)
+    # Build rrule string with DTSTART
+    rrule_str = "DTSTART:{0}\nRRULE:{1}".format(
+        start_date.strftime('%Y%m%dT%H%M%S'), recurrence_rule_clean
+    )
 
-        # Update child task code
+    try:
+        rule = rrulestr(rrule_str, dtstart=start_date)
+        occurrences = list(rule)
+    except Exception as e:
+        print(f"Failed to parse RRULE: {e}")
+        return parent_task
+
+    # ===========================
+    # Insert child tasks
+    # ===========================
+    # Only skip parent occurrence, all other valid dates get a task
+    for occurrence in occurrences:
+        if strip_tz(occurrence) == strip_tz(parent_due_date):
+            continue  # parent already created
+
+        child_task_id = await database.execute(
+            task.insert().values(
+                title=validated.title,
+                description=validated.description,
+                priority_level=validated.priority_level,
+                status=validated.status,
+                assigned_to=validated.assigned_to,
+                manager_id=validated.manager_id,
+                due_date=strip_tz(occurrence),
+                related_vendor=validated.related_vendor,
+                completion_notes=None,
+                completion_date=None,
+                project_id=validated.project_id,
+                event_id=validated.event_id,
+                tenant_id=validated.tenant_id,
+                event_phase=validated.event_phase,
+                recurrence_rule=None,
+                recurrence_end_date=None,
+                is_main_task=False,
+                space_id=validated.space_id,
+                asset_id=validated.asset_id,
+                is_archived=False,
+                archived_at=None,
+                created_by=validated.created_by,
+                updated_by=validated.created_by,
+                created_at=now,
+                updated_at=now,
+                parent_task_id=parent_task_id
+            )
+        )
+
         child_code = generate_code("TASK", child_task_id)
         await database.execute(
             task.update().where(task.c.task_id == child_task_id).values(code=child_code)
         )
 
     return parent_task
-
 
 async def list_child_tasks_by_parent(
     tenant_id: int,
