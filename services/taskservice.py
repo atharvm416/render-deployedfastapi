@@ -344,6 +344,7 @@ async def create_task_with_recurrence(data: TaskCreate) -> Optional[TaskOut]:
                 project_id=validated.project_id,
                 event_id=validated.event_id,
                 tenant_id=validated.tenant_id,
+                user_group_id=validated.user_group_id,
                 event_phase=validated.event_phase,
                 recurrence_rule=None,
                 recurrence_end_date=None,
